@@ -135,6 +135,262 @@ const ConfigPanel = ({ config, onConfigUpdate }) => {
   );
 };
 
+// Biography Component
+const Biography = ({ config }) => {
+  const [biography, setBiography] = useState({
+    outline: null,
+    full_text: null,
+    outline_updated: null,
+    text_updated: null,
+    word_count: 0
+  });
+  const [editingOutline, setEditingOutline] = useState(false);
+  const [outlineText, setOutlineText] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [activeView, setActiveView] = useState('outline');
+
+  useEffect(() => {
+    loadBiography();
+  }, []);
+
+  const loadBiography = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/biography`);
+      const data = await response.json();
+      setBiography(data);
+      setOutlineText(data.outline || '');
+    } catch (error) {
+      console.error('Error loading biography:', error);
+    }
+  };
+
+  const generateOutline = async () => {
+    if (!config?.configured) {
+      alert('Please configure your LLM settings first.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/biography/outline/generate`, {
+        method: 'POST',
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setBiography(prev => ({ ...prev, outline: data.outline }));
+        setOutlineText(data.outline);
+        setEditingOutline(false);
+      } else {
+        alert('Failed to generate outline');
+      }
+    } catch (error) {
+      console.error('Error generating outline:', error);
+      alert('Error generating outline');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveOutline = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/biography/outline`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ outline: outlineText }),
+      });
+
+      if (response.ok) {
+        setBiography(prev => ({ ...prev, outline: outlineText }));
+        setEditingOutline(false);
+        await loadBiography(); // Refresh to get updated timestamp
+      } else {
+        alert('Failed to save outline');
+      }
+    } catch (error) {
+      console.error('Error saving outline:', error);
+      alert('Error saving outline');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const generateBiography = async () => {
+    if (!config?.configured) {
+      alert('Please configure your LLM settings first.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/biography/generate`, {
+        method: 'POST',
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setBiography(prev => ({ 
+          ...prev, 
+          full_text: data.full_text,
+          word_count: data.word_count 
+        }));
+        setActiveView('text');
+        await loadBiography(); // Refresh to get updated timestamp
+      } else {
+        alert('Failed to generate biography');
+      }
+    } catch (error) {
+      console.error('Error generating biography:', error);
+      alert('Error generating biography');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!config?.configured) {
+    return (
+      <div className="biography-panel">
+        <p className="info-message">Please configure your LLM settings first.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="biography-panel">
+      <h3>Your Biography</h3>
+      
+      <div className="biography-nav">
+        <button 
+          className={`bio-nav-tab ${activeView === 'outline' ? 'active' : ''}`}
+          onClick={() => setActiveView('outline')}
+        >
+          Outline
+        </button>
+        <button 
+          className={`bio-nav-tab ${activeView === 'text' ? 'active' : ''}`}
+          onClick={() => setActiveView('text')}
+        >
+          Full Biography {biography.word_count > 0 && `(${biography.word_count.toLocaleString()} words)`}
+        </button>
+      </div>
+
+      {activeView === 'outline' && (
+        <div className="outline-section">
+          <div className="section-header">
+            <h4>Biography Outline</h4>
+            <div className="section-actions">
+              {!editingOutline ? (
+                <>
+                  <button 
+                    onClick={generateOutline}
+                    disabled={loading}
+                    className="primary-button small"
+                  >
+                    {loading ? 'Generating...' : biography.outline ? 'Regenerate Outline' : 'Generate Outline'}
+                  </button>
+                  {biography.outline && (
+                    <button 
+                      onClick={() => setEditingOutline(true)}
+                      className="secondary-button small"
+                    >
+                      Edit
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <button 
+                    onClick={saveOutline}
+                    disabled={loading}
+                    className="primary-button small"
+                  >
+                    {loading ? 'Saving...' : 'Save'}
+                  </button>
+                  <button 
+                    onClick={() => {
+                      setEditingOutline(false);
+                      setOutlineText(biography.outline || '');
+                    }}
+                    className="secondary-button small"
+                  >
+                    Cancel
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {biography.outline || editingOutline ? (
+            <div className="outline-content">
+              {editingOutline ? (
+                <textarea
+                  value={outlineText}
+                  onChange={(e) => setOutlineText(e.target.value)}
+                  className="outline-editor"
+                  rows="20"
+                  placeholder="Edit your biography outline..."
+                />
+              ) : (
+                <div className="outline-display">
+                  <pre>{biography.outline}</pre>
+                </div>
+              )}
+              {biography.outline_updated && (
+                <div className="last-updated">
+                  Last updated: {new Date(biography.outline_updated).toLocaleString()}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="no-outline">
+              <p>No outline generated yet. Click "Generate Outline" to create a comprehensive outline based on your interview responses.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeView === 'text' && (
+        <div className="biography-section">
+          <div className="section-header">
+            <h4>Full Biography</h4>
+            <div className="section-actions">
+              <button 
+                onClick={generateBiography}
+                disabled={loading}
+                className="primary-button"
+              >
+                {loading ? 'Generating...' : biography.full_text ? 'Regenerate Biography' : 'Generate Biography'}
+              </button>
+            </div>
+          </div>
+
+          {biography.full_text ? (
+            <div className="biography-content">
+              <div className="biography-stats">
+                <span>Word count: {biography.word_count.toLocaleString()}</span>
+                {biography.text_updated && (
+                  <span>Last updated: {new Date(biography.text_updated).toLocaleString()}</span>
+                )}
+              </div>
+              <div className="biography-text">
+                <pre>{biography.full_text}</pre>
+              </div>
+            </div>
+          ) : (
+            <div className="no-biography">
+              <p>No biography text generated yet.</p>
+              <p>Generate an outline first, then click "Generate Biography" to create your full life story based on your interview responses.</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Question Panel Component
 const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config }) => {
   const [answer, setAnswer] = useState('');
@@ -164,7 +420,7 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
       if (response.ok) {
         onAnswerSubmit();
         setAnswer('');
-        alert('Answer saved! Generate a new question to continue.');
+        alert('Response saved! Generate a new question to continue the interview.');
       } else {
         alert('Failed to save answer');
       }
@@ -219,17 +475,17 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
     <div className="question-panel">
       {currentQuestion ? (
         <div>
-          <h3>Current Question:</h3>
+          <h3>Current Interview Question:</h3>
           <div className="question-box">
             {currentQuestion.question}
           </div>
 
           <div className="answer-section">
-            <label>Your Answer:</label>
+            <label>Your Response:</label>
             <textarea
               value={answer}
               onChange={(e) => setAnswer(e.target.value)}
-              placeholder="Share your thoughts and experiences..."
+              placeholder="Share your thoughts, experiences, and memories..."
               className="answer-textarea"
               rows="6"
             />
@@ -238,7 +494,7 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
               disabled={loading || !answer.trim()}
               className="primary-button"
             >
-              {loading ? 'Saving...' : 'Save Answer'}
+              {loading ? 'Saving...' : 'Save Response'}
             </button>
           </div>
 
@@ -254,8 +510,8 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
         </div>
       ) : (
         <div className="no-question">
-          <h3>Ready to Begin Your Biography</h3>
-          <p>Click below to generate your first question.</p>
+          <h3>Ready to Begin Your Interview</h3>
+          <p>Let's start building your life story with thoughtful questions.</p>
           
           <div className="question-generation">
             <button 
@@ -263,7 +519,7 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
               disabled={loading}
               className="primary-button large"
             >
-              {loading ? 'Generating...' : 'Generate First Question'}
+              {loading ? 'Generating...' : 'Start Interview'}
             </button>
 
             <div className="custom-question-section">
@@ -271,7 +527,7 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
                 onClick={() => setShowCustomInput(!showCustomInput)}
                 className="link-button"
               >
-                Or write your own question
+                Or ask yourself a specific question
               </button>
 
               {showCustomInput && (
@@ -279,7 +535,7 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
                   <textarea
                     value={customQuestion}
                     onChange={(e) => setCustomQuestion(e.target.value)}
-                    placeholder="Enter your custom biographical question..."
+                    placeholder="Enter a specific question you'd like to explore..."
                     className="custom-question-input"
                     rows="3"
                   />
@@ -357,10 +613,10 @@ const QAHistory = ({ qaHistory, onUpdate, onDelete }) => {
 
   return (
     <div className="qa-history">
-      <h3>Your Biography So Far ({qaHistory.length} questions)</h3>
+      <h3>Interview History ({qaHistory.length} questions)</h3>
       
       {qaHistory.length === 0 ? (
-        <p className="no-history">No questions answered yet. Start by generating your first question!</p>
+        <p className="no-history">No questions answered yet. Start by conducting your first interview!</p>
       ) : (
         <div className="qa-list">
           {qaHistory.map((qa) => (
@@ -434,7 +690,7 @@ const App = () => {
   const [config, setConfig] = useState(null);
   const [currentQuestion, setCurrentQuestion] = useState(null);
   const [qaHistory, setQaHistory] = useState([]);
-  const [activeTab, setActiveTab] = useState('question');
+  const [activeTab, setActiveTab] = useState('interview');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -514,21 +770,27 @@ const App = () => {
     <div className="app">
       <header className="app-header">
         <h1>📖 Biographer AI</h1>
-        <p>Building your complete life story, one question at a time</p>
+        <p>Creating your life story through intelligent interviews</p>
       </header>
 
       <nav className="app-nav">
         <button 
-          className={`nav-tab ${activeTab === 'question' ? 'active' : ''}`}
-          onClick={() => setActiveTab('question')}
+          className={`nav-tab ${activeTab === 'interview' ? 'active' : ''}`}
+          onClick={() => setActiveTab('interview')}
         >
-          Current Question
+          Interview
         </button>
         <button 
           className={`nav-tab ${activeTab === 'history' ? 'active' : ''}`}
           onClick={() => setActiveTab('history')}
         >
-          Biography History
+          Interview History
+        </button>
+        <button 
+          className={`nav-tab ${activeTab === 'biography' ? 'active' : ''}`}
+          onClick={() => setActiveTab('biography')}
+        >
+          Biography
         </button>
         <button 
           className={`nav-tab ${activeTab === 'config' ? 'active' : ''}`}
@@ -539,7 +801,7 @@ const App = () => {
       </nav>
 
       <main className="app-main">
-        {activeTab === 'question' && (
+        {activeTab === 'interview' && (
           <QuestionPanel
             currentQuestion={currentQuestion}
             onAnswerSubmit={handleAnswerSubmit}
@@ -553,6 +815,12 @@ const App = () => {
             qaHistory={qaHistory}
             onUpdate={handleHistoryUpdate}
             onDelete={handleHistoryUpdate}
+          />
+        )}
+
+        {activeTab === 'biography' && (
+          <Biography
+            config={config}
           />
         )}
 

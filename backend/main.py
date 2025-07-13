@@ -57,6 +57,17 @@ def init_db():
         )
     """)
     
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS biography (
+            id INTEGER PRIMARY KEY,
+            outline TEXT,
+            full_text TEXT,
+            outline_updated DATETIME,
+            text_updated DATETIME,
+            word_count INTEGER DEFAULT 0
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -81,11 +92,19 @@ class AnswerRequest(BaseModel):
     qa_id: int
     answer: str
 
+class BiographyOutline(BaseModel):
+    outline: str
+
+class BiographyGeneration(BaseModel):
+    generate_full_text: bool = True
+
 # LLM Provider configurations
 LLM_MODELS = {
     "chatgpt": [
-        "gpt-4",
+        "gpt-4o",
+        "gpt-4o-mini",
         "gpt-4-turbo",
+        "gpt-4",
         "gpt-3.5-turbo"
     ],
     "claude": [
@@ -95,6 +114,8 @@ LLM_MODELS = {
     ],
     "openrouter": [
         "anthropic/claude-3.5-sonnet",
+        "openai/gpt-4o",
+        "openai/gpt-4-turbo",
         "openai/gpt-4",
         "meta-llama/llama-3.1-405b-instruct"
     ]
@@ -125,6 +146,46 @@ def get_all_qa_pairs():
     conn.close()
     return [dict(pair) for pair in pairs]
 
+def get_biography():
+    """Get current biography outline and text."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM biography WHERE id = 1")
+    biography = cursor.fetchone()
+    conn.close()
+    return dict(biography) if biography else None
+
+def save_biography_outline(outline: str):
+    """Save biography outline to database."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO biography (id, outline, outline_updated)
+        VALUES (1, ?, CURRENT_TIMESTAMP)
+    """, (outline,))
+    conn.commit()
+    conn.close()
+
+def save_biography_text(text: str):
+    """Save biography text to database."""
+    word_count = len(text.split())
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE biography SET full_text = ?, text_updated = CURRENT_TIMESTAMP, word_count = ?
+        WHERE id = 1
+    """, (text, word_count))
+    
+    # If no row exists, create one
+    if cursor.rowcount == 0:
+        cursor.execute("""
+            INSERT INTO biography (id, full_text, text_updated, word_count)
+            VALUES (1, ?, CURRENT_TIMESTAMP, ?)
+        """, (text, word_count))
+    
+    conn.commit()
+    conn.close()
+
 # LLM Integration
 async def call_chatgpt(prompt: str, config: dict) -> str:
     """Call ChatGPT API."""
@@ -136,7 +197,7 @@ async def call_chatgpt(prompt: str, config: dict) -> str:
     data = {
         "model": config["model"],
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500,
+        "max_tokens": 2000,
         "temperature": 0.7
     }
     
@@ -157,7 +218,7 @@ async def call_claude(prompt: str, config: dict) -> str:
     }
     data = {
         "model": config["model"],
-        "max_tokens": 500,
+        "max_tokens": 2000,
         "messages": [{"role": "user", "content": prompt}]
     }
     
@@ -178,7 +239,7 @@ async def call_openrouter(prompt: str, config: dict) -> str:
     data = {
         "model": config["model"],
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500,
+        "max_tokens": 2000,
         "temperature": 0.7
     }
     
@@ -229,6 +290,94 @@ Return only the question, without any additional text or formatting."""
     else:
         raise HTTPException(status_code=400, detail="Unsupported LLM provider")
 
+async def generate_biography_outline_with_llm(qa_pairs: List[dict]) -> str:
+    """Generate a biography outline based on all Q&A pairs."""
+    config = get_llm_config()
+    if not config:
+        raise HTTPException(status_code=400, detail="LLM not configured")
+    
+    if not qa_pairs:
+        return "No interview data available yet. Complete some interview questions first."
+    
+    # Create context from all answered Q&A pairs
+    qa_context = "Interview Data:\n"
+    answered_pairs = [pair for pair in qa_pairs if pair['answer']]
+    
+    for pair in answered_pairs:
+        qa_context += f"Q: {pair['question']}\n"
+        qa_context += f"A: {pair['answer']}\n\n"
+    
+    prompt = f"""Based on the following interview data, create a comprehensive outline for an autobiography. The outline should organize the person's life story into logical chapters and sections that would make for a compelling, complete biography.
+
+{qa_context}
+
+Create a detailed outline that includes:
+- Major life phases/chapters (childhood, education, career, relationships, etc.)
+- Key themes and experiences that emerge from the interviews
+- Significant events, turning points, and milestones
+- Personal growth, challenges overcome, and lessons learned
+- A logical narrative flow that would engage readers
+
+Format the outline with clear chapter headings and bullet points for major topics within each chapter. Make it comprehensive enough to guide the writing of a full autobiography, but concise enough to be easily reviewed and edited.
+
+Return only the outline, without any additional commentary."""
+
+    # Call appropriate LLM
+    if config["provider"] == "chatgpt":
+        return await call_chatgpt(prompt, config)
+    elif config["provider"] == "claude":
+        return await call_claude(prompt, config)
+    elif config["provider"] == "openrouter":
+        return await call_openrouter(prompt, config)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported LLM provider")
+
+async def generate_biography_text_with_llm(qa_pairs: List[dict], outline: str) -> str:
+    """Generate full biography text based on Q&A pairs and outline."""
+    config = get_llm_config()
+    if not config:
+        raise HTTPException(status_code=400, detail="LLM not configured")
+    
+    if not qa_pairs:
+        return "No interview data available yet. Complete some interview questions first."
+    
+    # Create context from all answered Q&A pairs
+    qa_context = "Interview Data:\n"
+    answered_pairs = [pair for pair in qa_pairs if pair['answer']]
+    
+    for pair in answered_pairs:
+        qa_context += f"Q: {pair['question']}\n"
+        qa_context += f"A: {pair['answer']}\n\n"
+    
+    prompt = f"""Using the following interview data and outline, write a comprehensive autobiography in first person. The biography should be engaging, well-structured, and capture the person's authentic voice and experiences.
+
+OUTLINE:
+{outline}
+
+INTERVIEW DATA:
+{qa_context}
+
+Write a complete autobiography that:
+- Follows the provided outline structure
+- Uses a compelling narrative voice in first person
+- Incorporates all relevant details from the interview responses
+- Flows naturally from one section to the next
+- Includes specific anecdotes, emotions, and personal insights
+- Maintains authenticity to the person's actual experiences and voice
+- Is well-written and engaging for readers
+
+The biography should be substantial (aim for at least 2000 words) and comprehensive. Use the interview responses as the primary source material, expanding them into full narrative form while staying true to the facts and tone provided."""
+
+    # Call appropriate LLM
+    if config["provider"] == "chatgpt":
+        return await call_chatgpt(prompt, config)
+    elif config["provider"] == "claude":
+        return await call_claude(prompt, config)
+    elif config["provider"] == "openrouter":
+        return await call_openrouter(prompt, config)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported LLM provider")
+
 # API Endpoints
 @app.on_event("startup")
 async def startup_event():
@@ -250,22 +399,33 @@ async def get_models(provider: str):
 @app.post("/config/llm")
 async def set_llm_config(config: LLMConfig):
     """Configure LLM provider and model."""
+    print(f"Received config: provider={config.provider}, model={config.model}")
+    print(f"Available providers: {list(LLM_MODELS.keys())}")
+    print(f"Available models for {config.provider}: {LLM_MODELS.get(config.provider, [])}")
+    
     if config.provider not in LLM_MODELS:
-        raise HTTPException(status_code=400, detail="Unsupported provider")
+        print(f"ERROR: Unsupported provider: {config.provider}")
+        raise HTTPException(status_code=400, detail=f"Unsupported provider: {config.provider}")
     
     if config.model not in LLM_MODELS[config.provider]:
-        raise HTTPException(status_code=400, detail="Unsupported model for provider")
+        print(f"ERROR: Unsupported model {config.model} for provider {config.provider}")
+        print(f"Available models: {LLM_MODELS[config.provider]}")
+        raise HTTPException(status_code=400, detail=f"Unsupported model {config.model} for provider {config.provider}")
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT OR REPLACE INTO llm_config (id, provider, model, api_key)
-        VALUES (1, ?, ?, ?)
-    """, (config.provider, config.model, config.api_key))
-    conn.commit()
-    conn.close()
-    
-    return {"message": "LLM configuration saved"}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO llm_config (id, provider, model, api_key)
+            VALUES (1, ?, ?, ?)
+        """, (config.provider, config.model, config.api_key))
+        conn.commit()
+        conn.close()
+        print("Config saved successfully")
+        return {"message": "LLM configuration saved"}
+    except Exception as e:
+        print(f"Database error: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @app.get("/config/llm")
 async def get_current_llm_config():
@@ -366,6 +526,55 @@ async def delete_qa_pair(qa_id: int):
     conn.close()
     
     return {"message": "Q&A pair deleted"}
+
+@app.get("/biography")
+async def get_biography_data():
+    """Get current biography outline and text."""
+    biography = get_biography()
+    if not biography:
+        return {
+            "outline": None,
+            "full_text": None,
+            "outline_updated": None,
+            "text_updated": None,
+            "word_count": 0
+        }
+    return biography
+
+@app.post("/biography/outline/generate")
+async def generate_outline():
+    """Generate biography outline from interview data."""
+    qa_pairs = get_all_qa_pairs()
+    outline = await generate_biography_outline_with_llm(qa_pairs)
+    save_biography_outline(outline)
+    return {"outline": outline}
+
+@app.put("/biography/outline")
+async def update_outline(outline_data: BiographyOutline):
+    """Update biography outline."""
+    save_biography_outline(outline_data.outline)
+    return {"message": "Outline updated"}
+
+@app.post("/biography/generate")
+async def generate_full_biography():
+    """Generate full biography text from interview data and outline."""
+    qa_pairs = get_all_qa_pairs()
+    biography = get_biography()
+    
+    if not biography or not biography.get('outline'):
+        # Generate outline first if it doesn't exist
+        outline = await generate_biography_outline_with_llm(qa_pairs)
+        save_biography_outline(outline)
+    else:
+        outline = biography['outline']
+    
+    full_text = await generate_biography_text_with_llm(qa_pairs, outline)
+    save_biography_text(full_text)
+    
+    return {
+        "full_text": full_text,
+        "word_count": len(full_text.split())
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
