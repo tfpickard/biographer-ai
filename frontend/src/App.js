@@ -10,6 +10,8 @@ const ConfigPanel = ({ config, onConfigUpdate }) => {
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [dbStats, setDbStats] = useState(null);
+  const [importFile, setImportFile] = useState(null);
 
   const providerOptions = [
     { value: 'claude', label: 'Claude (Anthropic)' },
@@ -22,6 +24,27 @@ const ConfigPanel = ({ config, onConfigUpdate }) => {
       fetchModels(provider);
     }
   }, [provider]);
+
+  useEffect(() => {
+    loadDbStats();
+  }, []);
+
+  useEffect(() => {
+    // Refresh stats when config changes (triggered by data updates)
+    if (config?._refresh) {
+      loadDbStats();
+    }
+  }, [config]);
+
+  const loadDbStats = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/database/stats`);
+      const data = await response.json();
+      setDbStats(data);
+    } catch (error) {
+      console.error('Error loading database stats:', error);
+    }
+  };
 
   const fetchModels = async (selectedProvider) => {
     try {
@@ -80,57 +103,225 @@ const ConfigPanel = ({ config, onConfigUpdate }) => {
     }
   };
 
+  const handleExportDatabase = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/database/export`);
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `biographer_export_${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } else {
+        alert('Failed to export database');
+      }
+    } catch (error) {
+      console.error('Error exporting database:', error);
+      alert('Error exporting database');
+    }
+  };
+
+  const handleImportDatabase = async () => {
+    if (!importFile) {
+      alert('Please select a file to import');
+      return;
+    }
+
+    if (!window.confirm('This will replace all your current interview data and biography. Are you sure?')) {
+      return;
+    }
+
+    try {
+      const fileText = await importFile.text();
+      const importData = JSON.parse(fileText);
+
+      const response = await fetch(`${API_BASE_URL}/database/import`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(importData),
+      });
+
+      if (response.ok) {
+        alert('Database imported successfully!');
+        setImportFile(null);
+        loadDbStats();
+        // Reset file input
+        const fileInput = document.querySelector('input[type="file"]');
+        if (fileInput) fileInput.value = '';
+      } else {
+        alert('Failed to import database');
+      }
+    } catch (error) {
+      console.error('Error importing database:', error);
+      alert('Error importing database - please check the file format');
+    }
+  };
+
+  const handleClearDatabase = async () => {
+    const confirmed = window.confirm(
+      'This will permanently delete ALL your interview data and biography. This cannot be undone. Are you absolutely sure?'
+    );
+    
+    if (!confirmed) return;
+
+    const doubleConfirmed = window.confirm(
+      'Last chance: This will delete everything except your LLM configuration. Type YES in the next prompt to confirm.'
+    );
+    
+    if (!doubleConfirmed) return;
+
+    const finalConfirm = window.prompt('Type "YES" to confirm deletion:');
+    if (finalConfirm !== 'YES') {
+      alert('Database clear cancelled');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/database/clear`, {
+        method: 'DELETE',
+      });
+
+      if (response.ok) {
+        alert('Database cleared successfully');
+        loadDbStats();
+      } else {
+        alert('Failed to clear database');
+      }
+    } catch (error) {
+      console.error('Error clearing database:', error);
+      alert('Error clearing database');
+    }
+  };
+
   return (
     <div className="config-panel">
-      <h3>LLM Configuration</h3>
-      <div className="form-group">
-        <label>Provider:</label>
-        <select 
-          value={provider} 
-          onChange={(e) => setProvider(e.target.value)}
-          className="select-input"
+      <h3>Configuration</h3>
+      
+      {/* LLM Configuration Section */}
+      <div className="config-section">
+        <h4>LLM Settings</h4>
+        <div className="form-group">
+          <label>Provider:</label>
+          <select 
+            value={provider} 
+            onChange={(e) => setProvider(e.target.value)}
+            className="select-input"
+          >
+            {providerOptions.map(option => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="form-group">
+          <label>Model:</label>
+          <select 
+            value={model} 
+            onChange={(e) => setModel(e.target.value)}
+            className="select-input"
+          >
+            {models.map(modelName => (
+              <option key={modelName} value={modelName}>
+                {modelName}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="form-group">
+          <label>API Key:</label>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder="Enter your API key"
+            className="text-input"
+          />
+        </div>
+
+        <button 
+          onClick={handleSave} 
+          disabled={loading}
+          className="primary-button"
         >
-          {providerOptions.map(option => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+          {loading ? 'Saving...' : 'Save Configuration'}
+        </button>
       </div>
 
-      <div className="form-group">
-        <label>Model:</label>
-        <select 
-          value={model} 
-          onChange={(e) => setModel(e.target.value)}
-          className="select-input"
-        >
-          {models.map(modelName => (
-            <option key={modelName} value={modelName}>
-              {modelName}
-            </option>
-          ))}
-        </select>
-      </div>
+      {/* Database Management Section */}
+      <div className="config-section">
+        <h4>Database Management</h4>
+        
+        {dbStats && (
+          <div className="db-stats">
+            <div className="stats-grid">
+              <div className="stat-item">
+                <span className="stat-label">Total Questions:</span>
+                <span className="stat-value">{dbStats.total_questions}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Answered:</span>
+                <span className="stat-value">{dbStats.answered_questions}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Biography Words:</span>
+                <span className="stat-value">{dbStats.biography_word_count.toLocaleString()}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Database Size:</span>
+                <span className="stat-value">{dbStats.database_size_mb} MB</span>
+              </div>
+            </div>
+          </div>
+        )}
 
-      <div className="form-group">
-        <label>API Key:</label>
-        <input
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder="Enter your API key"
-          className="text-input"
-        />
-      </div>
+        <div className="db-actions">
+          <div className="action-group">
+            <h5>Export Data</h5>
+            <p>Download your interview data and biography as a JSON file</p>
+            <button onClick={handleExportDatabase} className="secondary-button">
+              Export Database
+            </button>
+          </div>
 
-      <button 
-        onClick={handleSave} 
-        disabled={loading}
-        className="primary-button"
-      >
-        {loading ? 'Saving...' : 'Save Configuration'}
-      </button>
+          <div className="action-group">
+            <h5>Import Data</h5>
+            <p>Upload a previously exported JSON file to restore your data</p>
+            <input
+              type="file"
+              accept=".json"
+              onChange={(e) => setImportFile(e.target.files[0])}
+              className="file-input"
+            />
+            <button 
+              onClick={handleImportDatabase}
+              disabled={!importFile}
+              className="secondary-button"
+            >
+              Import Database
+            </button>
+          </div>
+
+          <div className="action-group danger">
+            <h5>Clear All Data</h5>
+            <p>⚠️ Permanently delete all interview data and biography (keeps LLM config)</p>
+            <button 
+              onClick={handleClearDatabase}
+              className="danger-button"
+            >
+              Clear Database
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
@@ -395,7 +586,9 @@ const Biography = ({ config }) => {
 const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config }) => {
   const [answer, setAnswer] = useState('');
   const [customQuestion, setCustomQuestion] = useState('');
+  const [questionPrompt, setQuestionPrompt] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
+  const [showPromptInput, setShowPromptInput] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const handleAnswerSubmit = async () => {
@@ -418,9 +611,13 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
       });
 
       if (response.ok) {
-        onAnswerSubmit();
         setAnswer('');
-        alert('Response saved! Generate a new question to continue the interview.');
+        onAnswerSubmit(); // This will refresh history and clear current question
+        
+        // Automatically generate next question
+        setTimeout(() => {
+          handleGenerateQuestion();
+        }, 500);
       } else {
         alert('Failed to save answer');
       }
@@ -432,12 +629,16 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
     }
   };
 
-  const handleGenerateQuestion = async (isCustom = false) => {
+  const handleGenerateQuestion = async (isCustom = false, isPrompted = false) => {
     setLoading(true);
     try {
-      const requestBody = isCustom && customQuestion.trim() 
-        ? { custom_question: customQuestion.trim() }
-        : {};
+      let requestBody = {};
+      
+      if (isCustom && customQuestion.trim()) {
+        requestBody = { custom_question: customQuestion.trim() };
+      } else if (isPrompted && questionPrompt.trim()) {
+        requestBody = { question_prompt: questionPrompt.trim() };
+      }
 
       const response = await fetch(`${API_BASE_URL}/question/generate`, {
         method: 'POST',
@@ -451,7 +652,9 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
         const data = await response.json();
         onNewQuestion(data);
         setCustomQuestion('');
+        setQuestionPrompt('');
         setShowCustomInput(false);
+        setShowPromptInput(false);
       } else {
         alert('Failed to generate question');
       }
@@ -506,6 +709,35 @@ const QuestionPanel = ({ currentQuestion, onAnswerSubmit, onNewQuestion, config 
             >
               Generate New Question
             </button>
+            
+            <div className="prompt-question-section">
+              <button 
+                onClick={() => setShowPromptInput(!showPromptInput)}
+                className="link-button"
+                disabled={loading}
+              >
+                Ask about specific topic
+              </button>
+
+              {showPromptInput && (
+                <div className="prompt-input">
+                  <input
+                    type="text"
+                    value={questionPrompt}
+                    onChange={(e) => setQuestionPrompt(e.target.value)}
+                    placeholder="e.g., 'ask me about my paperclip collection' or 'my college years'"
+                    className="prompt-question-input"
+                  />
+                  <button 
+                    onClick={() => handleGenerateQuestion(false, true)}
+                    disabled={loading || !questionPrompt.trim()}
+                    className="primary-button small"
+                  >
+                    Generate Question
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       ) : (
@@ -746,16 +978,29 @@ const App = () => {
   const handleNewQuestion = (questionData) => {
     setCurrentQuestion(questionData);
     loadQAHistory(); // Refresh history
+    // Refresh config stats if needed
+    if (activeTab === 'config') {
+      setConfig(prev => ({ ...prev, _refresh: Date.now() }));
+    }
   };
 
   const handleAnswerSubmit = () => {
     setCurrentQuestion(null);
     loadQAHistory(); // Refresh history
+    // Refresh config stats if needed
+    if (activeTab === 'config') {
+      setConfig(prev => ({ ...prev, _refresh: Date.now() }));
+    }
   };
 
   const handleHistoryUpdate = () => {
     loadQAHistory();
     loadCurrentQuestion();
+    // Refresh config panel if it's active to update database stats
+    if (activeTab === 'config') {
+      // Force refresh of the config panel by updating a state
+      setConfig(prev => ({ ...prev, _refresh: Date.now() }));
+    }
   };
 
   if (loading) {

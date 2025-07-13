@@ -5,8 +5,9 @@ A FastAPI application that generates biographical questions using LLMs
 and stores Q&A pairs for building an exhaustive autobiography.
 """
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import sqlite3
@@ -16,6 +17,8 @@ import aiohttp
 from datetime import datetime
 import os
 import uvicorn
+import tempfile
+import shutil
 
 app = FastAPI(title="Biographer AI", version="1.0.0")
 
@@ -87,6 +90,7 @@ class QAPair(BaseModel):
 
 class QuestionRequest(BaseModel):
     custom_question: Optional[str] = None
+    question_prompt: Optional[str] = None
 
 class AnswerRequest(BaseModel):
     qa_id: int
@@ -250,7 +254,7 @@ async def call_openrouter(prompt: str, config: dict) -> str:
             result = await response.json()
             return result["choices"][0]["message"]["content"].strip()
 
-async def generate_question_with_llm(existing_qa_pairs: List[dict]) -> str:
+async def generate_question_with_llm(existing_qa_pairs: List[dict], topic_prompt: str = None) -> str:
     """Generate a new biographical question using the configured LLM."""
     config = get_llm_config()
     if not config:
@@ -265,9 +269,14 @@ async def generate_question_with_llm(existing_qa_pairs: List[dict]) -> str:
             if pair['answer']:
                 qa_context += f"A: {pair['answer']}\n\n"
     
+    # Add topic prompt if provided
+    topic_instruction = ""
+    if topic_prompt:
+        topic_instruction = f"\nSPECIFIC TOPIC REQUEST: The user wants you to ask a question about: {topic_prompt}\n"
+    
     prompt = f"""You are an expert biographer tasked with creating an exhaustive, authoritative autobiography. 
     
-{qa_context}
+{qa_context}{topic_instruction}
 
 Based on the previous questions and answers (if any), generate ONE thoughtful, specific biographical question that would help build a comprehensive life story. 
 
@@ -277,6 +286,7 @@ The question should:
 - Build naturally on previous answers when possible
 - Avoid redundancy with already-asked questions
 - Be personally meaningful and likely to reveal important details
+{f"- Focus specifically on the requested topic: {topic_prompt}" if topic_prompt else ""}
 
 Return only the question, without any additional text or formatting."""
 
@@ -445,10 +455,17 @@ async def generate_question(request: QuestionRequest = None):
     if request and request.custom_question:
         # User provided custom question
         question = request.custom_question.strip()
+        is_custom = True
+    elif request and request.question_prompt:
+        # Generate question using LLM with specific topic prompt
+        existing_pairs = get_all_qa_pairs()
+        question = await generate_question_with_llm(existing_pairs, request.question_prompt.strip())
+        is_custom = False
     else:
         # Generate question using LLM
         existing_pairs = get_all_qa_pairs()
         question = await generate_question_with_llm(existing_pairs)
+        is_custom = False
     
     # Store question in database
     conn = get_db_connection()
@@ -456,7 +473,7 @@ async def generate_question(request: QuestionRequest = None):
     cursor.execute("""
         INSERT INTO qa_pairs (question, is_custom)
         VALUES (?, ?)
-    """, (question, bool(request and request.custom_question)))
+    """, (question, is_custom))
     qa_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -464,7 +481,7 @@ async def generate_question(request: QuestionRequest = None):
     return {
         "id": qa_id,
         "question": question,
-        "is_custom": bool(request and request.custom_question)
+        "is_custom": is_custom
     }
 
 @app.post("/answer")
@@ -575,6 +592,138 @@ async def generate_full_biography():
         "full_text": full_text,
         "word_count": len(full_text.split())
     }
+
+@app.get("/database/export")
+async def export_database():
+    """Export the entire database as JSON."""
+    try:
+        # Get all data
+        qa_pairs = get_all_qa_pairs()
+        biography = get_biography()
+        config = get_llm_config()
+        
+        # Remove sensitive data
+        if config:
+            config.pop('api_key', None)
+        
+        export_data = {
+            "export_date": datetime.now().isoformat(),
+            "qa_pairs": qa_pairs,
+            "biography": biography,
+            "config": config
+        }
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(export_data, f, indent=2, default=str)
+            temp_path = f.name
+        
+        return FileResponse(
+            temp_path,
+            media_type='application/json',
+            filename=f"biographer_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+@app.post("/database/import")
+async def import_database(import_data: dict):
+    """Import database from JSON data."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Clear existing data
+        cursor.execute("DELETE FROM qa_pairs")
+        cursor.execute("DELETE FROM biography")
+        # Don't delete LLM config as it contains API keys
+        
+        # Import Q&A pairs
+        if "qa_pairs" in import_data:
+            for qa in import_data["qa_pairs"]:
+                cursor.execute("""
+                    INSERT INTO qa_pairs (question, answer, timestamp, is_custom, category, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    qa.get("question"),
+                    qa.get("answer"),
+                    qa.get("timestamp"),
+                    qa.get("is_custom", False),
+                    qa.get("category"),
+                    qa.get("metadata")
+                ))
+        
+        # Import biography
+        if "biography" in import_data and import_data["biography"]:
+            bio = import_data["biography"]
+            cursor.execute("""
+                INSERT OR REPLACE INTO biography 
+                (id, outline, full_text, outline_updated, text_updated, word_count)
+                VALUES (1, ?, ?, ?, ?, ?)
+            """, (
+                bio.get("outline"),
+                bio.get("full_text"),
+                bio.get("outline_updated"),
+                bio.get("text_updated"),
+                bio.get("word_count", 0)
+            ))
+        
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Database imported successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+
+@app.delete("/database/clear")
+async def clear_database():
+    """Clear all data from the database (except LLM config)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM qa_pairs")
+        cursor.execute("DELETE FROM biography")
+        
+        conn.commit()
+        conn.close()
+        
+        return {"message": "Database cleared successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Clear failed: {str(e)}")
+
+@app.get("/database/stats")
+async def get_database_stats():
+    """Get database statistics."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM qa_pairs")
+        total_questions = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM qa_pairs WHERE answer IS NOT NULL AND answer != ''")
+        answered_questions = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT word_count FROM biography WHERE id = 1")
+        bio_result = cursor.fetchone()
+        bio_word_count = bio_result[0] if bio_result else 0
+        
+        # Calculate database file size
+        db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+        
+        conn.close()
+        
+        return {
+            "total_questions": total_questions,
+            "answered_questions": answered_questions,
+            "unanswered_questions": total_questions - answered_questions,
+            "biography_word_count": bio_word_count,
+            "database_size_bytes": db_size,
+            "database_size_mb": round(db_size / (1024 * 1024), 2)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stats failed: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
